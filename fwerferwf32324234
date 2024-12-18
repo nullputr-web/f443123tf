@@ -1,0 +1,735 @@
+repeat 
+    task.wait() 
+until game:IsLoaded()
+
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character
+local EventsFolder = ReplicatedStorage:WaitForChild("Events")
+local CharStatsFolder = ReplicatedStorage:WaitForChild("CharStats")
+
+local FilterFolder = Workspace:WaitForChild("Filter")
+local DebrisFolder = Workspace:WaitForChild("Debris")
+local CurrentCamera = Workspace.CurrentCamera
+
+-- DONT FORGET TO UPDATE THIS ONCE U RESPAWN, U FUCKING RETARD
+local RaycastParameters = RaycastParams.new() do
+    RaycastParameters.BruteForceAllSlow = false;
+    RaycastParameters.IgnoreWater = true;
+    RaycastParameters.CollisionGroup = "Character"
+    RaycastParameters.FilterType = Enum.RaycastFilterType.Exclude;
+    RaycastParameters.FilterDescendantsInstances = {
+        Character,
+        FilterFolder,
+        DebrisFolder,
+        CurrentCamera,
+        workspace:WaitForChild("Characters")
+    }
+end
+
+local function UpdateRaycastParameters()
+    RaycastParameters.FilterDescendantsInstances = {
+        Character,
+        FilterFolder,
+        DebrisFolder,
+        CurrentCamera,
+    }
+end
+
+local function ScanTable(Table: { [any]: any }, Check: (any, any) -> (boolean)): (any, any)
+	for Index, Value in next, Table do
+		if Check(Index, Value) then
+			return Index, Value
+		end
+	end
+
+    return false, nil
+end
+
+local function ScanTableForFunction(Table: { [any]: any }, FunctionName: string): (...any) -> (...any)
+	local Index, Function = ScanTable(Table, function(Index, Value)
+		if type(Value) ~= "function" then
+			return false
+		end
+
+        if debug.getinfo(Value).name ~= FunctionName then
+            return false
+        end
+
+        return true
+	end)
+
+    assert(Index, `Failed to find "{FunctionName}" in {Table}.`)
+	return Function
+end
+
+local function GetCharacterStats(Player: Player): Folder?
+	return CharStatsFolder:FindFirstChild(Player.Name)
+end
+
+-- THIS MIGHT BE COMPLETLY USELESS CHECK LATER IF SLOW OK?
+local function GetDirection(Origin: Vector3, Position: Vector3): Vector3
+	return (Position - Origin).Unit * 1000
+end
+
+local function GetIntersectingPart(Origin: Vector3, Position: Vector3): Instance?
+	local Direction = GetDirection(Origin, Position)
+    local Results = workspace:Raycast(Origin, Direction, RaycastParameters);
+
+    if not Results then
+        return nil
+    end
+
+	return Results.Instance
+end
+
+local function CanHit(Player: Player, HitpartName: string, Origin: Vector3, Position: Vector3?): (boolean, BasePart?)
+	local Character = Player.Character
+	if not Character then
+		return false
+	end
+
+    local HitPart: BasePart? = Character:FindFirstChild(HitpartName, false)
+    if not HitPart then
+        return false
+    end
+
+	if Character:FindFirstChildOfClass("ForceField") then
+		return false
+    end
+
+	local Humanoid = Character:FindFirstChild("Humanoid")
+	if not Humanoid then
+		return false
+	end
+
+	if Humanoid.Health <= 0 then
+		return false
+	end
+
+	local PlayerStats = GetCharacterStats(Player)
+	if not PlayerStats then
+		return false
+	end
+
+	if PlayerStats.Downed.Value then
+		return false
+	end
+
+    local HitPosition = Position or HitPart.Position
+
+	local Intersecting = GetIntersectingPart(Origin, HitPosition)
+	if Intersecting then
+		if not Intersecting:IsDescendantOf(Character) then
+			return false
+        --else
+            --print("how the fuck did this even happen nigga fix ur code")
+		end
+	end
+
+	return true, HitPart
+end
+
+local function ValidateHitPart(Player: Player, HitpartName: string): (boolean, BasePart?)
+    local Character = Player.Character
+	if not Character then
+		return false
+	end
+
+    local HitPart: BasePart? = Character:FindFirstChild(HitpartName, false)
+    if not HitPart then
+        return false
+    end
+
+	if Character:FindFirstChildOfClass("ForceField") then
+		return false
+    end
+
+	local Humanoid = Character:FindFirstChild("Humanoid")
+	if not Humanoid then
+		return false
+	end
+
+	if Humanoid.Health <= 0 then
+		return false
+	end
+
+	local PlayerStats = GetCharacterStats(Player)
+	if not PlayerStats then
+		return false
+	end
+
+	if PlayerStats.Downed.Value then
+		return false
+	end
+
+    return true, HitPart
+end
+
+local function GetClosestTargetFromOrigin(Origin: Vector3, HitpartName: string): (Player?, BasePart?)
+	local Target, TargetHitPart = nil, nil
+	local ShortestDistance = math.huge
+
+	for _, Player in Players:GetPlayers() do
+		if Player ~= LocalPlayer then
+			local CanHit, HitPart = CanHit(Player, HitpartName, Origin)
+			if not CanHit then
+                continue
+            end
+            local CurrentDistance = LocalPlayer:DistanceFromCharacter(HitPart.Position)
+            if CurrentDistance < ShortestDistance then
+                Target = Player
+                TargetHitPart = HitPart
+                ShortestDistance = CurrentDistance
+            end
+		end
+	end
+
+	return Target, TargetHitPart
+end
+
+local function GenerateBulletKey(Length: number): string
+    local Buffer = table.create(Length + 1)
+    for _ = 1, 30 do
+        table.insert(Buffer, string.char(math.random(65, 90)))
+    end
+    table.insert(Buffer, math.random(0,9))
+
+    return table.concat(Buffer)
+end
+
+local WeaponHandler = {
+    Tool = nil,
+    Config = nil,
+    Values = nil,
+    LastShot = nil,
+    WeaponClient = nil,
+    FirePos = nil,
+    IsRunning = true,
+    IgnoreFirerate = nil,
+} do
+    local NoFirerateCheck = {
+        ["Beretta"] = true,
+        ["TEC-9"] = true,
+        ["MAC-10"] = true
+    }
+
+    WeaponHandler.__index = WeaponHandler
+    WeaponHandler.Events = {
+		Shoot = EventsFolder:WaitForChild("GNX_S"),
+		Hit = EventsFolder:WaitForChild("ZFKLF_H")
+	}
+
+    function WeaponHandler:syncAmmo()
+        local Client, Server = self.Client, self.Server
+        Client.Ammo.Value = Server.Ammo.Value
+	    Client.StoredAmmo.Value = Server.StoredAmmo.Value
+    end
+
+    function WeaponHandler:visualizeBullet(OriginV3: Vector3, PositionV3: Vector3)
+        local Origin, End = CFrame.new(OriginV3), CFrame.new(PositionV3)
+
+        local colorSequence = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, Color3.fromHSV(tick() % 5 / 5, 1, 1)),
+            ColorSequenceKeypoint.new(1, Color3.fromHSV(tick() % 4 / 5, 1, 1)),
+        })
+        local Part = Instance.new("Part", workspace.CurrentCamera.Bullets)
+        Part.Size = Vector3.new(0.1, 0.1, 0.1)
+        Part.Transparency = 1
+        Part.CanCollide = false
+        Part.CFrame = Origin
+        Part.Anchored = true
+        local Attachment = Instance.new("Attachment", Part)
+        local Part2 = Instance.new("Part", workspace.CurrentCamera.Bullets)
+        Part2.Size = Vector3.new(0.1, 0.1, 0.1)
+        Part2.Transparency = 0
+        Part2.CanCollide = false
+        Part2.CFrame = End
+        Part2.Anchored = true
+        Part2.Color = Color3.fromHSV(tick() % 4 / 5, 1, 1)
+        local Attachment2 = Instance.new("Attachment", Part2)
+        local Beam = Instance.new("Beam", Part)
+
+        Beam.FaceCamera = true
+        Beam.Color = colorSequence
+        Beam.Attachment0 = Attachment
+        Beam.Attachment1 = Attachment2
+        Beam.LightEmission = 10
+        Beam.LightInfluence = 10
+        Beam.Width0 = 1
+        Beam.Width1 = 1
+        Beam.Texture = "http://www.roblox.com/asset/?id=446111271"
+        Beam.TextureSpeed = 0.3
+        Beam.TextureLength = 0.1
+        Beam.ZOffset = -1
+        delay(2, function()
+            for i = 0.5, 1, 0.02 do
+                wait()
+                Beam.Transparency = NumberSequence.new(i)
+            end
+            Part:Destroy()
+            Part2:Destroy()
+        end)
+    end
+
+    function WeaponHandler:canShoot(): (boolean, string?)
+        if self.Tool.Parent ~= Character then
+            return false, "Not Equipped"
+        end
+    
+        if self.IgnoreFirerate then
+            if (tick() - self.LastShot) < 0 then
+                return false, "Firerate 1"
+            end
+        else
+            if (tick() - self.LastShot) < (0.75 / self.Config.FireRate) then
+                return false, "Firerate 2"
+            end
+        end
+
+        if self.Server.Ammo.Value == 0 then
+            return false, "No Ammo"
+        end
+
+        return true
+    end
+
+    function WeaponHandler:makeHitmarker(Headshot: boolean)
+        self.Crosshair:hitmarker(Headshot, 1, 0.25)
+    end
+
+    function WeaponHandler:newBullets(HitPosition: Vector3, _Origin: Vector3?): (string, {Vector3})
+        -- print(`newBullets({HitPosition}, {_Origin})`)
+        local BulletKey = GenerateBulletKey(30)
+        local Origin = _Origin or self.FirePos.WorldCFrame.Position
+    
+        local HitDirections = {}
+        for _ = 1, self.Config.BulletsPerShot do
+            table.insert(HitDirections, CFrame.new(Origin, HitPosition).LookVector)
+        end
+    
+        self.LastShot = tick()
+
+        self.Events.Shoot:FireServer(
+            self.GetTick(), 
+            BulletKey, 
+            self.Tool, 
+            "FDS9I83", 
+            Origin, 
+            HitDirections,
+            false
+        )
+        return BulletKey, HitDirections
+    end
+
+    function WeaponHandler:hitBullets(HitPart: BasePart, Key: string, HitPosition: Vector3, HitDirections: {Vector3}, _Origin: Vector3?)
+        local HitEvent: RemoteEvent = self.Events.Hit
+        local OriginPart = self.FirePos
+
+        for Index, Direction in HitDirections do
+            HitEvent:FireServer(
+                "\240\159\141\175",
+                self.Tool,
+                Key,
+                Index,
+                HitPart,
+                HitPosition,
+                Direction,
+                nil,
+                nil
+            )
+
+            self:visualizeBullet(_Origin or OriginPart.WorldCFrame.Position, HitPosition)
+            self:makeHitmarker(HitPart.Name == "Head")
+        end
+    end
+
+    function WeaponHandler:shoot(HitPart: BasePart, _HitPosition: Vector3?, _Origin: Vector3?)
+        if not self.IsRunning then
+            return
+        end
+
+        if not HitPart then
+            return
+        end
+
+        local CanShoot, Reason = self:canShoot()
+        if not CanShoot then
+            -- print("[shoot] wont shoot because ", Reason)
+            return
+        end
+
+        local HitPosition = _HitPosition or HitPart.Position
+        local Key, Positions = self:newBullets(HitPosition, _Origin)
+        self:hitBullets(HitPart, Key, HitPosition, Positions, _Origin)
+    end
+
+    function WeaponHandler:construct()
+        self.Client = {
+            Ammo = self.Values:WaitForChild("Ammo"),
+            StoredAmmo = self.Values:WaitForChild("StoredAmmo"),
+        }
+        self.Server = {
+            Ammo = self.Values:WaitForChild("SERVER_Ammo"),
+            StoredAmmo = self.Values:WaitForChild("SERVER_StoredAmmo"),
+        }
+
+        self.OnUpdate = self.Server.Ammo.Changed:Connect(function(NewValue)
+            self:syncAmmo()
+        end)
+    
+        self.OnDrop = self.Tool.AncestryChanged:Connect(function(Object, NewAncestry)
+            if NewAncestry == nil then
+                self:deconstruct()
+            end
+        end)
+
+        local GetTick do
+            local ACTIIV_Upvalues = debug.getupvalues(self.WeaponClient.ACTIIV)
+            self.Shoot_Function = ScanTableForFunction(ACTIIV_Upvalues, "Shoot")
+
+            local Shoot_Upvalues = debug.getupvalues(self.Shoot_Function)
+            local _, PublicMethods = ScanTable(Shoot_Upvalues, function(Index, Value)
+                if type(Value) ~= "userdata" then
+                    return false
+                end
+
+                local MT = getrawmetatable(Value)
+                if not MT then
+                    return false
+                end
+
+                Value = MT.__index
+                if type(Value) ~= "table" then
+                    return false
+                end
+
+                if rawget(Value, "cg") and rawget(Value, "new") then
+                    return true
+                end
+
+                return false
+            end)
+            GetTick = PublicMethods.cg
+        end
+
+        local Crosshair do
+            local Holster_Upvalues = debug.getupvalues(self.WeaponClient.Holster)
+            local _, CrosshairTable = ScanTable(Holster_Upvalues, function(Index, Value)
+                if type(Value) ~= "table" then
+                    return false
+                end
+
+                if rawget(Value, "setcrosssettings") then
+                    return true
+                end
+
+                return false
+            end)
+            Crosshair = CrosshairTable
+        end
+    
+        self.GetTick = GetTick
+        self.Crosshair = Crosshair
+    end
+
+    function WeaponHandler:deconstruct()
+        self.OnUpdate:Disconnect()
+        self.OnDrop:Disconnect()
+        self.IsRunning = false
+    end
+
+    function WeaponHandler.new(Weapon: Tool)
+        print("Created new WeaponHandler")
+        local Values = Weapon:WaitForChild("Values")
+        local Config = Weapon:WaitForChild("Config")
+        local Handle = Weapon:WaitForChild("WeaponHandle")
+        local FirePos = Handle:FindFirstChild("OriginFirePos")
+            or Handle:FindFirstChild("FirePos")
+            or Handle:FindFirstChild("Muzzle")
+        
+        local WeaponClient do
+            local ActivatedConnection = getconnections(Weapon.Activated)[1]
+            local ActivatedFunction = ActivatedConnection.Function
+            WeaponClient = debug.getupvalue(ActivatedFunction, 1)
+            WeaponClient = getrawmetatable(WeaponClient).__index
+        end
+    
+        local self = setmetatable({
+            Tool = Weapon,
+            Config = require(Config),
+            Values = Values,
+            LastShot = 0,
+            WeaponClient = WeaponClient,
+            FirePos = FirePos,
+            IsRunning = true,
+            IgnoreFirerate = NoFirerateCheck[Weapon.Name]
+        }, WeaponHandler)
+    
+        self:construct()
+        return self
+    end
+end
+
+-- Ensure Players service is referenced
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local StarterGui = game:GetService("StarterGui")
+
+-- Variables for UI state
+local currentTarget = nil
+local minimized = false
+
+-- Utility function to find a player by partial or full username
+local function FindPlayerByName(name)
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and string.find(string.lower(player.Name), string.lower(name)) then
+            return player
+        end
+    end
+    return nil
+end
+
+-- Create a small GUI
+local ScreenGui = Instance.new("ScreenGui")
+local MainFrame = Instance.new("Frame")
+local InputBox = Instance.new("TextBox")
+local SetTargetButton = Instance.new("TextButton")
+local MinimizeButton = Instance.new("TextButton")
+
+ScreenGui.Parent = game.CoreGui
+
+MainFrame.Name = "MainFrame"
+MainFrame.Parent = ScreenGui
+MainFrame.BackgroundColor3 = Color3.fromRGB(60, 100, 160) -- Light-darkish blue
+MainFrame.Size = UDim2.new(0, 200, 0, 80)
+MainFrame.Position = UDim2.new(0.5, -100, 0.5, -40)
+MainFrame.Draggable = true
+MainFrame.Active = true
+MainFrame.Visible = true
+
+InputBox.Name = "InputBox"
+InputBox.Parent = MainFrame
+InputBox.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+InputBox.Size = UDim2.new(0.8, 0, 0, 20)
+InputBox.Position = UDim2.new(0.1, 0, 0.2, 0)
+InputBox.Font = Enum.Font.SourceSans
+InputBox.PlaceholderText = "Username"
+InputBox.Text = ""
+InputBox.TextColor3 = Color3.new(0, 0, 0)
+InputBox.TextSize = 14
+
+SetTargetButton.Name = "SetTargetButton"
+SetTargetButton.Parent = MainFrame
+SetTargetButton.BackgroundColor3 = Color3.fromRGB(80, 130, 200)
+SetTargetButton.Size = UDim2.new(0.8, 0, 0, 20)
+SetTargetButton.Position = UDim2.new(0.1, 0, 0.5, 0)
+SetTargetButton.Font = Enum.Font.SourceSansBold
+SetTargetButton.Text = "Set Target"
+SetTargetButton.TextColor3 = Color3.new(1, 1, 1)
+SetTargetButton.TextSize = 14
+
+MinimizeButton.Name = "MinimizeButton"
+MinimizeButton.Parent = MainFrame
+MinimizeButton.BackgroundColor3 = Color3.fromRGB(60, 100, 160)
+MinimizeButton.Size = UDim2.new(0, 20, 0, 20)
+MinimizeButton.Position = UDim2.new(1, -25, 0, 5)
+MinimizeButton.Font = Enum.Font.SourceSansBold
+MinimizeButton.Text = "-"
+MinimizeButton.TextColor3 = Color3.new(1, 1, 1)
+MinimizeButton.TextSize = 14
+
+-- Minimize functionality
+MinimizeButton.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    for _, child in ipairs(MainFrame:GetChildren()) do
+        if child ~= MinimizeButton then
+            child.Visible = not minimized
+        end
+    end
+    MinimizeButton.Text = minimized and "+" or "-"
+    MainFrame.Size = minimized and UDim2.new(0, 200, 0, 25) or UDim2.new(0, 200, 0, 80)
+end)
+
+-- Set target button functionality
+SetTargetButton.MouseButton1Click:Connect(function()
+    local target = FindPlayerByName(InputBox.Text)
+    if target then
+        currentTarget = target
+        InputBox.Text = "Target: " .. target.Name
+        StarterGui:SetCore("SendNotification", {
+            Title = "Target Set",
+            Text = "Target set to " .. target.Name,
+            Duration = 3
+        })
+    else
+        InputBox.Text = "[Not Found]"
+        StarterGui:SetCore("SendNotification", {
+            Title = "Target Error",
+            Text = "Target not found",
+            Duration = 3
+        })
+    end
+end)
+
+local Offsets = {
+    Vector3.new(1, 0, 1),
+    Vector3.new(1, 0, -1),
+    Vector3.new(-1, 0, 1),
+    Vector3.new(-1, 0, -1),
+    Vector3.new(1, 1, 0),
+    Vector3.new(1, -1, 0),
+    Vector3.new(-1, 1, 0),
+    Vector3.new(-1, -1, 0),
+    Vector3.new(0, 1, 1),
+    Vector3.new(0, -1, 1),
+    Vector3.new(0, 1, -1),
+    Vector3.new(0, -1, -1)
+}
+
+local function GetCubeOffsets(Origin: Vector3, Distance: number): { Vector3 }
+    local Result = table.create(12)
+
+    for _, Offset in ipairs(Offsets) do
+        local Position = Origin + (Offset * Distance)
+        local Direction = Position - Origin
+        local Magnitude = Direction.Magnitude
+
+        if Magnitude > Distance then
+            Direction = Direction.Unit * Distance
+            Position = Origin + Direction
+        end
+
+        table.insert(Result, Position)
+    end
+
+    return Result
+end
+
+local Params = RaycastParams.new() do
+    Params.FilterType = Enum.RaycastFilterType.Exclude
+    Params.IgnoreWater = true
+    Params.RespectCanCollide = true
+    Params.FilterDescendantsInstances = {
+        CurrentCamera,
+        Workspace.Characters,
+        Workspace.Debris,
+        Workspace.Filter,
+        Workspace.Characters,
+        Workspace.Map.Parts.Grinders,
+    }
+end
+
+local function CheckIfVisible(Origin: Vector3, Result: Vector3)
+    local Hit = workspace:Raycast(Origin, Result - Origin, Params)
+
+    return Hit
+end
+
+-- Update the target check function to use the GUI target
+local function GetTargetAndPositions(Origin: Vector3, HitpartName: string): (boolean, { Origin: Vector3, Position: Vector3, Player: Player, Part: BasePart }?)
+    if not currentTarget then
+        return false, nil
+    end
+
+    local Player = currentTarget
+    local IsValid, HitPart = ValidateHitPart(Player, HitpartName)
+
+    if (not IsValid) or (not HitPart) then
+        return false, nil
+    end
+
+    local HitPosition = HitPart.Position
+    local PossibleOrigins = GetCubeOffsets(Origin, 19)
+    local PossibleHits = GetCubeOffsets(HitPosition, 23)
+
+    for _, OffsetOrigin in next, PossibleOrigins do
+        for _, OffsetHit in next, PossibleHits do
+            local HitSomething = CheckIfVisible(OffsetOrigin, OffsetHit)
+
+            if HitSomething then
+                continue
+            end
+
+            return true, {
+                Origin = OffsetOrigin,
+                Position = OffsetHit,
+                Player = Player,
+                Part = HitPart
+            }
+        end
+    end
+
+    return false, nil
+end
+
+
+local WeaponHandlers = {}
+local ActiveWeaponHandler: typeof(WeaponHandler)
+
+local function UpdateWeaponClient(Tool: Tool)
+    if not Tool then
+        return
+    end
+
+    if Tool.ClassName ~= "Tool" then
+        return
+    end
+
+    if not Tool:FindFirstChild("IsGun") then
+        return
+    end
+
+    local GunClient = Tool:WaitForChild("Gun")
+    if WeaponHandlers[GunClient] then
+        ActiveWeaponHandler = WeaponHandlers[GunClient]
+    else
+        WeaponHandlers[GunClient] = WeaponHandler.new(Tool)
+        ActiveWeaponHandler = WeaponHandlers[GunClient]
+    end
+    print("Set ActiveWeaponHandler")
+end
+
+_G.ToolAdded = nil
+local function UpdateConnections()
+	if _G.ToolAdded then
+		_G.ToolAdded:Disconnect()
+	end
+
+	_G.ToolAdded = Character.ChildAdded:Connect(function(NewChild)
+        UpdateWeaponClient(NewChild)
+	end)
+end
+
+if _G.CharacterAdded then
+    _G.CharacterAdded:Disconnect()
+end
+
+_G.CharacterAdded = LocalPlayer.CharacterAdded:Connect(function(NewCharacter)
+	Character = NewCharacter
+	UpdateConnections()
+    UpdateRaycastParameters()
+end)
+
+UpdateConnections()
+
+if _G.RenderStepped then
+    _G.RenderStepped:Disconnect()
+    _G.RenderStepped = nil
+end
+
+
+UpdateWeaponClient(Character:FindFirstChildOfClass("Tool"))
+
+
+_G.RenderStepped = RunService.RenderStepped:Connect(function()
+local Success, Data = GetTargetAndPositions(Character.HumanoidRootPart.Position, "Head")
+if Success then
+    ActiveWeaponHandler:shoot(Data.Part, Data.Position, Data.Origin)
+  
+end
+end)
